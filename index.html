@@ -37,12 +37,78 @@ button.alt{background:#263847}#message{min-height:18px;color:#ffb5b5;font-size:1
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
 <script type="module">
 import * as THREE from 'three';
-import { XRHandModelFactory } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRHandModelFactory.js';
+import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 const $=s=>document.querySelector(s), msg=$('#message'), state=$('#state'), tip=$('#tip'), video=$('#cam');
 let scene,renderer,centerCam,leftCam,rightCam,clock,started=false,cardboard=false,gyroOn=false,held=false,weapon,buttonMesh;
-let handAim=new Map(), activeHandRay=null, handModels=[];
+let handAim=new Map(), activeHandRay=null, visionStream=null, handLandmarker=null, visionHands=[], pinchState=new Map(), lastVisionFrame=0, visionBusy=false;
 let targets=[],paint=[],lastTrigger=false,lastShot=0,moveTouch={x:0,y:0},yaw=0,pitch=0,deviceQ=new THREE.Quaternion(),screenQ=new THREE.Quaternion();
 const ray=new THREE.Raycaster(), v=new THREE.Vector3();
+
+const HAND_BONES=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+function createVisionHands(){
+ visionHands=[];
+ for(let h=0;h<2;h++){
+  const joints=[];
+  for(let i=0;i<21;i++){
+   const dot=new THREE.Mesh(new THREE.SphereGeometry(.018,8,6),new THREE.MeshBasicMaterial({color:h===0?0x36e6ff:0xffcf45}));
+   scene.add(dot);joints.push(dot);
+  }
+  const lines=HAND_BONES.map(()=>{const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const line=new THREE.Line(geo,new THREE.LineBasicMaterial({color:h===0?0x36e6ff:0xffcf45}));scene.add(line);return line});
+  visionHands.push({joints,lines});
+ }
+}
+async function startVisionHands(){
+ try{
+  msg.textContent='Allow camera access so PRIME-XR can track your hands.';
+  visionStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480}}});
+  video.srcObject=visionStream;video.style.display='block';video.style.opacity='0.001';video.style.width='2px';video.style.height='2px';
+  await video.play();
+  const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  handLandmarker=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.55,minHandPresenceConfidence:.5,minTrackingConfidence:.5});
+  createVisionHands();msg.textContent='';state.textContent='WEBXR ACTIVE • CAMERA HAND TRACKING';
+  tip.textContent='Show your hands in the rear camera view • pinch thumb and index finger';
+ }catch(e){
+  msg.textContent='Hand tracking camera setup failed: '+(e?.message||e);
+  state.textContent='WEBXR ACTIVE • HAND CAMERA UNAVAILABLE';
+ }
+}
+function updateVisionHands(now){
+ if(!handLandmarker||!renderer.xr.isPresenting||video.readyState<2||visionBusy||now-lastVisionFrame<33)return;
+ visionBusy=true;lastVisionFrame=now;
+ try{
+  const result=handLandmarker.detectForVideo(video,now),lists=result.landmarks||[],xrCam=renderer.xr.getCamera(centerCam);
+  xrCam.updateMatrixWorld(true);
+  const worldQ=new THREE.Quaternion().setFromRotationMatrix(xrCam.matrixWorld);
+  const seen=new Set();
+  for(let h=0;h<visionHands.length;h++){
+   const lm=lists[h],view=visionHands[h];
+   if(!lm){view.joints.forEach(o=>o.visible=false);view.lines.forEach(o=>o.visible=false);continue}
+   seen.add(h);
+   const world=[];
+   for(let i=0;i<21;i++){
+    const p=lm[i],local=new THREE.Vector3((.5-p.x)*1.05,(.5-p.y)*.78,-.85-p.z*.25);
+    local.applyMatrix4(xrCam.matrixWorld);world.push(local);
+    view.joints[i].position.copy(local);view.joints[i].visible=true;
+   }
+   for(let i=0;i<HAND_BONES.length;i++){
+    const [a,b]=HAND_BONES[i],line=view.lines[i],attr=line.geometry.attributes.position;
+    attr.setXYZ(0,world[a].x,world[a].y,world[a].z);attr.setXYZ(1,world[b].x,world[b].y,world[b].z);attr.needsUpdate=true;line.visible=true;
+   }
+   const thumb=lm[4],index=lm[8],pinch=Math.hypot(thumb.x-index.x,thumb.y-index.y,thumb.z-index.z)<.055;
+   const key=h===0?'left':'right',was=pinchState.get(key)||false;
+   if(pinch&&!was){
+    const direction=world[8].clone().sub(world[5]).normalize();
+    const origin=world[8].clone();
+    tip.textContent='PINCH DETECTED • HAND INTERACTION';
+    interact({origin,direction});
+   }
+   pinchState.set(key,pinch);
+  }
+  for(let h=0;h<2;h++)if(!seen.has(h)){visionHands[h].joints.forEach(o=>o.visible=false);visionHands[h].lines.forEach(o=>o.visible=false);pinchState.set(h===0?'left':'right',false)}
+ }catch(e){/* A dropped camera frame should not stop the XR render loop. */}
+ finally{visionBusy=false}
+}
+
 const mat=(c,r=.85,m=0)=>new THREE.MeshStandardMaterial({color:c,roughness:r,metalness:m});
 function meshBox(w,h,d,m,x,y,z){const o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);o.position.set(x,y,z);scene.add(o);return o}
 function mannequin(x,z,n){
@@ -115,23 +181,7 @@ function updatePhysics(dt){
 }
 function render(time, xrFrame){
  const dt=Math.min(clock.getDelta(),.04);
- if(renderer.xr.isPresenting && xrFrame){
-  const session=renderer.xr.getSession(), ref=renderer.xr.getReferenceSpace();
-  if(session && ref){
-   for(const source of session.inputSources){
-    if(!source.hand)continue;
-    const tipSpace=source.hand.get('index-finger-tip'), distalSpace=source.hand.get('index-finger-phalanx-distal');
-    if(!tipSpace)continue;
-    const tipPose=xrFrame.getJointPose(tipSpace,ref), distalPose=distalSpace?xrFrame.getJointPose(distalSpace,ref):null;
-    if(tipPose){
-     const p=tipPose.transform.position, q=tipPose.transform.orientation;
-     const origin=new THREE.Vector3(p.x,p.y,p.z), direction=new THREE.Vector3(0,0,-1).applyQuaternion(new THREE.Quaternion(q.x,q.y,q.z,q.w)).normalize();
-     if(distalPose){const d=distalPose.transform.position;direction.sub(new THREE.Vector3(d.x,d.y,d.z).sub(origin)).normalize();}
-     handAim.set(source.handedness,{origin,direction});
-    }
-   }
-  }
- }
+ if(renderer.xr.isPresenting && xrFrame){updateVisionHands(performance.now())}
  if(!renderer.xr.isPresenting){
   updateInput(dt);orientCamera();
   if(held){const pos=new THREE.Vector3(.32,-.25,-.65).applyQuaternion(centerCam.quaternion).add(centerCam.position);weapon.position.lerp(pos,.35);weapon.quaternion.slerp(centerCam.quaternion,.35)}
@@ -161,20 +211,14 @@ async function enableGyro(){
  }catch(e){msg.textContent='Gyroscope permission failed: '+e.message}
 }
 function installXRHands(session){
- const factory=new XRHandModelFactory();
- for(let i=0;i<2;i++){
-  const hand=renderer.xr.getHand(i);
-  const model=factory.createHandModel(hand,'spheres');
-  hand.add(model);scene.add(hand);handModels.push(hand);
- }
- session.addEventListener('selectstart',e=>{
-  if(!e.inputSource || !e.inputSource.hand)return;
-  const aim=handAim.get(e.inputSource.handedness);
-  if(aim){tip.textContent='HAND PINCH • INTERACTION';interact({origin:aim.origin.clone(),direction:aim.direction.clone()});}
+ state.textContent='WEBXR ACTIVE • STARTING CAMERA HAND TRACKING';
+ session.addEventListener('end',()=>{
+  handAim.clear();activeHandRay=null;pinchState.clear();
+  if(visionStream){visionStream.getTracks().forEach(t=>t.stop());visionStream=null}
+  if(handLandmarker){handLandmarker.close();handLandmarker=null}
+  visionHands.forEach(hand=>{hand.joints.forEach(o=>scene.remove(o));hand.lines.forEach(o=>scene.remove(o))});visionHands=[];
  });
- session.addEventListener('end',()=>{handAim.clear();activeHandRay=null;});
- state.textContent='WEBXR ACTIVE • HAND TRACKING REQUESTED';
- tip.textContent='Show your hands to the headset • pinch thumb and index finger to interact';
+ startVisionHands();
 }
 async function begin(card){
  if(started)return;started=true;cardboard=card;$('#menu').style.display='none';init();await enableGyro();startCamera();loop();
