@@ -37,8 +37,10 @@ button.alt{background:#263847}#message{min-height:18px;color:#ffb5b5;font-size:1
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
 <script type="module">
 import * as THREE from 'three';
+import { XRHandModelFactory } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/XRHandModelFactory.js';
 const $=s=>document.querySelector(s), msg=$('#message'), state=$('#state'), tip=$('#tip'), video=$('#cam');
 let scene,renderer,centerCam,leftCam,rightCam,clock,started=false,cardboard=false,gyroOn=false,held=false,weapon,buttonMesh;
+let handAim=new Map(), activeHandRay=null, handModels=[];
 let targets=[],paint=[],lastTrigger=false,lastShot=0,moveTouch={x:0,y:0},yaw=0,pitch=0,deviceQ=new THREE.Quaternion(),screenQ=new THREE.Quaternion();
 const ray=new THREE.Raycaster(), v=new THREE.Vector3();
 const mat=(c,r=.85,m=0)=>new THREE.MeshStandardMaterial({color:c,roughness:r,metalness:m});
@@ -76,15 +78,18 @@ function init(){
 function orientCamera(){
  if(gyroOn&&!renderer.xr.isPresenting){centerCam.quaternion.copy(deviceQ);centerCam.rotateY(yaw);centerCam.rotateX(pitch)}
 }
-function aimRay(){ray.setFromCamera(new THREE.Vector2(0,0),centerCam);return ray.ray}
-function interact(){
+function aimRay(){if(activeHandRay){ray.set(activeHandRay.origin,activeHandRay.direction);return ray.ray}ray.setFromCamera(new THREE.Vector2(0,0),centerCam);return ray.ray}
+function interact(handRay=null){
+ activeHandRay=handRay;
+ if(handRay)ray.set(handRay.origin,handRay.direction);else ray.setFromCamera(new THREE.Vector2(0,0),centerCam);
  const hits=ray.intersectObjects([weapon,buttonMesh],true);
  if(hits.length&&hits[0].distance<4){
   let o=hits[0].object, isGun=false;weapon.traverse(c=>{if(c===o)isGun=true});
   if(isGun){if(!held){held=true;tip.textContent='WEAPON PICKED UP • PRESS TRIGGER TO FIRE'}else shoot();return}
   if(o===buttonMesh){buttonMesh.material.color.set(0x38d66b);tip.textContent='TABLE BUTTON ACTIVATED';setTimeout(()=>buttonMesh.material.color.set(0xd51e2b),850);return}
  }
- if(held)shoot();else tip.textContent='Aim at the weapon on the table and press the trigger.';
+ if(held)shoot();else tip.textContent='Point your index finger and pinch to interact.';
+ activeHandRay=null;
 }
 function burst(p){for(let i=0;i<24;i++){const m=new THREE.Mesh(new THREE.SphereGeometry(.035,6,5),mat(i%2?0xc51c2b:0xff5960));m.position.copy(p);scene.add(m);paint.push({m,v:new THREE.Vector3((Math.random()-.5)*4,Math.random()*3,(Math.random()-.5)*4),life:1})}}
 function shoot(){
@@ -108,8 +113,25 @@ function updatePhysics(dt){
  targets.filter(t=>!t.alive).forEach(t=>{t.vel.y-=9.8*dt;t.g.position.addScaledVector(t.vel,dt);t.g.rotation.x+=t.spin.x*dt;t.g.rotation.y+=t.spin.y*dt;t.g.rotation.z+=t.spin.z*dt;if(t.g.position.y<.18){t.g.position.y=.18;t.vel.y=Math.max(0,-t.vel.y*.15);t.vel.x*=.86;t.vel.z*=.86;t.spin.multiplyScalar(.9)}});
  for(let i=paint.length-1;i>=0;i--){const p=paint[i];p.life-=dt;p.v.y-=6*dt;p.m.position.addScaledVector(p.v,dt);if(p.life<=0){scene.remove(p.m);p.m.geometry.dispose();p.m.material.dispose();paint.splice(i,1)}}
 }
-function render(){
+function render(time, xrFrame){
  const dt=Math.min(clock.getDelta(),.04);
+ if(renderer.xr.isPresenting && xrFrame){
+  const session=renderer.xr.getSession(), ref=renderer.xr.getReferenceSpace();
+  if(session && ref){
+   for(const source of session.inputSources){
+    if(!source.hand)continue;
+    const tipSpace=source.hand.get('index-finger-tip'), distalSpace=source.hand.get('index-finger-phalanx-distal');
+    if(!tipSpace)continue;
+    const tipPose=xrFrame.getJointPose(tipSpace,ref), distalPose=distalSpace?xrFrame.getJointPose(distalSpace,ref):null;
+    if(tipPose){
+     const p=tipPose.transform.position, q=tipPose.transform.orientation;
+     const origin=new THREE.Vector3(p.x,p.y,p.z), direction=new THREE.Vector3(0,0,-1).applyQuaternion(new THREE.Quaternion(q.x,q.y,q.z,q.w)).normalize();
+     if(distalPose){const d=distalPose.transform.position;direction.sub(new THREE.Vector3(d.x,d.y,d.z).sub(origin)).normalize();}
+     handAim.set(source.handedness,{origin,direction});
+    }
+   }
+  }
+ }
  if(!renderer.xr.isPresenting){
   updateInput(dt);orientCamera();
   if(held){const pos=new THREE.Vector3(.32,-.25,-.65).applyQuaternion(centerCam.quaternion).add(centerCam.position);weapon.position.lerp(pos,.35);weapon.quaternion.slerp(centerCam.quaternion,.35)}
@@ -138,6 +160,22 @@ async function enableGyro(){
   },true);gyroOn=true;state.textContent='GYROSCOPE ACTIVE';
  }catch(e){msg.textContent='Gyroscope permission failed: '+e.message}
 }
+function installXRHands(session){
+ const factory=new XRHandModelFactory();
+ for(let i=0;i<2;i++){
+  const hand=renderer.xr.getHand(i);
+  const model=factory.createHandModel(hand,'spheres');
+  hand.add(model);scene.add(hand);handModels.push(hand);
+ }
+ session.addEventListener('selectstart',e=>{
+  if(!e.inputSource || !e.inputSource.hand)return;
+  const aim=handAim.get(e.inputSource.handedness);
+  if(aim){tip.textContent='HAND PINCH • INTERACTION';interact({origin:aim.origin.clone(),direction:aim.direction.clone()});}
+ });
+ session.addEventListener('end',()=>{handAim.clear();activeHandRay=null;});
+ state.textContent='WEBXR ACTIVE • HAND TRACKING REQUESTED';
+ tip.textContent='Show your hands to the headset • pinch thumb and index finger to interact';
+}
 async function begin(card){
  if(started)return;started=true;cardboard=card;$('#menu').style.display='none';init();await enableGyro();startCamera();loop();
  if(card){document.documentElement.requestFullscreen?.().catch(()=>{});tip.textContent='CARDBOARD MODE • SPLIT SCREEN • GYROSCOPE';}
@@ -148,9 +186,9 @@ $('#webxr').addEventListener('click',async()=>{
  // requestSession must be called directly from the user gesture, before awaiting camera or sensor setup.
  if(!navigator.xr){msg.textContent='WebXR immersive VR is not supported here. Use CARDBOARD VR for split-screen mode.';return}
  try{
-  const s=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
+  const s=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
   if(!started){started=true;$('#menu').style.display='none';init();loop()}
-  renderer.xr.enabled=true;await renderer.xr.setSession(s);cardboard=false;state.textContent='WEBXR VR ACTIVE';tip.textContent='VR headset tracking active • use controller trigger';
+  renderer.xr.enabled=true;await renderer.xr.setSession(s);cardboard=false;installXRHands(s);
  }catch(e){msg.textContent='WebXR could not start: '+e.message+' • Try CARDBOARD VR.'}
 });
 addEventListener('resize',()=>{if(centerCam&&renderer){centerCam.aspect=innerWidth/innerHeight;centerCam.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)}});
