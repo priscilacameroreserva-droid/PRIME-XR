@@ -64,7 +64,8 @@ async function startVisionHands(){
   video.srcObject=visionStream;video.style.display='block';video.style.opacity='0.001';video.style.width='2px';video.style.height='2px';
   await video.play();
   const files=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-  handLandmarker=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.55,minHandPresenceConfidence:.5,minTrackingConfidence:.5});
+  const options={baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'},runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.55,minHandPresenceConfidence:.5,minTrackingConfidence:.5};
+  try{handLandmarker=await HandLandmarker.createFromOptions(files,{...options,baseOptions:{...options.baseOptions,delegate:'GPU'}})}catch(gpuError){handLandmarker=await HandLandmarker.createFromOptions(files,{...options,baseOptions:{...options.baseOptions,delegate:'CPU'}})}
   createVisionHands();msg.textContent='';state.textContent='WEBXR ACTIVE • CAMERA HAND TRACKING';
   tip.textContent='Show your hands in the rear camera view • pinch thumb and index finger';
  }catch(e){
