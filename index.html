@@ -148,10 +148,10 @@ function init(){
 function orientCamera(){
  if(gyroOn&&!renderer.xr.isPresenting){centerCam.quaternion.copy(deviceQ);centerCam.rotateY(yaw);centerCam.rotateX(pitch)}
 }
-function aimRay(){if(activeHandRay){ray.set(activeHandRay.origin,activeHandRay.direction);return ray.ray}ray.setFromCamera(new THREE.Vector2(0,0),centerCam);return ray.ray}
+function aimRay(){if(activeHandRay){ray.set(activeHandRay.origin,activeHandRay.direction);return ray.ray}if(renderer?.xr?.isPresenting){const cam=renderer.xr.getCamera(centerCam);cam.updateMatrixWorld(true);const origin=cam.getWorldPosition(new THREE.Vector3()),direction=cam.getWorldDirection(new THREE.Vector3());ray.set(origin,direction);return ray.ray}ray.setFromCamera(new THREE.Vector2(0,0),centerCam);return ray.ray}
 function interact(handRay=null){
  activeHandRay=handRay;
- if(handRay)ray.set(handRay.origin,handRay.direction);else ray.setFromCamera(new THREE.Vector2(0,0),centerCam);
+ if(handRay)ray.set(handRay.origin,handRay.direction);else aimRay();
  const hits=ray.intersectObjects([weapon,buttonMesh],true);
  if(hits.length&&hits[0].distance<4){
   let o=hits[0].object, isGun=false;weapon.traverse(c=>{if(c===o)isGun=true});
@@ -173,12 +173,21 @@ function xrUseRightHand(point){
 function updateXRControls(dt){
  if(!renderer.xr.isPresenting)return;
  const session=renderer.xr.getSession();if(!session)return;
- let left=null,right=null;
- for(const source of session.inputSources){if(source.handedness==='left'&&source.gamepad)left=source;if(source.handedness==='right'&&source.gamepad)right=source}
- if(left){
-  const axes=left.gamepad.axes||[];const x=axes.length>=4?(axes[2]||0):(axes[0]||0),y=axes.length>=4?(axes[3]||0):(axes[1]||0);
-  if(Math.abs(x)>.12||Math.abs(y)>.12){
-   const cam=renderer.xr.getCamera(centerCam),q=new THREE.Quaternion().setFromRotationMatrix(cam.matrixWorld);
+ let leftSource=null,rightSource=null;
+ for(const source of session.inputSources){if(source.handedness==='left'&&source.gamepad)leftSource=source;if(source.handedness==='right'&&source.gamepad)rightSource=source}
+ // DualShock 4 Bluetooth/USB often appears in navigator.getGamepads(), not as an XRInputSource.
+ const connected=[...(navigator.getGamepads?.()||[])].filter(Boolean);
+ const ds4=connected.find(p=>/dualshock|wireless controller|playstation|054c/i.test(p.id||''))||connected.find(p=>p.mapping==='standard')||connected[0]||null;
+ const leftPad=leftSource?.gamepad||ds4;
+ const rightPad=rightSource?.gamepad||ds4;
+ if(leftPad){
+  const axes=leftPad.axes||[];
+  // Standard DualShock 4: axes 0/1 are the left stick. XR controllers may expose 2/3.
+  const useXRStick=!!leftSource&&axes.length>=4;
+  const x=axes[useXRStick?2:0]||0,y=axes[useXRStick?3:1]||0;
+  if(Math.abs(x)>.13||Math.abs(y)>.13){
+   const cam=renderer.xr.getCamera(centerCam);cam.updateMatrixWorld(true);
+   const q=new THREE.Quaternion().setFromRotationMatrix(cam.matrixWorld);
    const f=new THREE.Vector3(0,0,-1).applyQuaternion(q);f.y=0;f.normalize();
    const side=new THREE.Vector3(1,0,0).applyQuaternion(q);side.y=0;side.normalize();
    xrMove.addScaledVector(f,-y*2.8*dt);xrMove.addScaledVector(side,x*2.8*dt);
@@ -186,18 +195,23 @@ function updateXRControls(dt){
    if(base&&typeof XRRigidTransform!=='undefined')renderer.xr.setReferenceSpace(base.getOffsetReferenceSpace(new XRRigidTransform({x:-xrMove.x,y:-xrMove.y,z:-xrMove.z})));
   }
  }
- if(right){
-  const controller=renderer.xr.getController(1);controller.updateMatrixWorld(true);
-  const point=controller.getWorldPosition(new THREE.Vector3()),pressed=!!right.gamepad.buttons?.[0]?.pressed;
-  if(pressed&&!xrTriggerDown)xrUseRightHand(point);
+ if(rightPad){
+  const buttons=rightPad.buttons||[];
+  // DualShock 4 R2 is button 7 in the standard Gamepad mapping; XR trigger is button 0.
+  const triggerButton=rightSource?buttons[0]:buttons[7];
+  const triggerValue=triggerButton?(Math.max(triggerButton.value||0,triggerButton.pressed?1:0)):0;
+  const pressed=triggerValue>.55;
+  if(pressed&&!xrTriggerDown){
+   // The DS4 has no tracked 3D position: aim with the headset reticle, then press R2.
+   interact();
+  }
   xrTriggerDown=pressed;
-  if(held&&xrHeldByController){weapon.position.lerp(point,.38);weapon.quaternion.slerp(new THREE.Quaternion().setFromRotationMatrix(controller.matrixWorld),.35)}
  }else xrTriggerDown=false;
 }
 function burst(p){for(let i=0;i<24;i++){const m=new THREE.Mesh(new THREE.SphereGeometry(.035,6,5),mat(i%2?0xc51c2b:0xff5960));m.position.copy(p);scene.add(m);paint.push({m,v:new THREE.Vector3((Math.random()-.5)*4,Math.random()*3,(Math.random()-.5)*4),life:1})}}
 function shoot(){
  if(!held)return;const now=performance.now();if(now-lastShot<280)return;lastShot=now;
- const origin=centerCam.position.clone(),direction=aimRay().direction.clone();
+ const shotRay=aimRay(),origin=shotRay.origin.clone(),direction=shotRay.direction.clone();
  const candidates=[];targets.filter(t=>t.alive).forEach(t=>t.g.traverse(o=>{if(o.isMesh)candidates.push(o)}));
  const hit=ray.intersectObjects(candidates,false)[0];
  if(hit){const t=targets.find(t=>{let yes=false;t.g.traverse(o=>{if(o===hit.object)yes=true});return yes});if(t){t.alive=false;t.vel.set((t.g.position.x-origin.x)*.55,2.4,-2.1);t.spin.set((Math.random()-.5)*2.4,(Math.random()-.5)*2,(Math.random()-.5)*2.5);burst(hit.point);tip.textContent='TARGET HIT • RAGDOLL + RED PAINT'}}
