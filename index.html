@@ -41,6 +41,7 @@ import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@m
 const $=s=>document.querySelector(s), msg=$('#message'), state=$('#state'), tip=$('#tip'), video=$('#cam');
 let scene,renderer,centerCam,leftCam,rightCam,clock,started=false,cardboard=false,gyroOn=false,held=false,weapon,buttonMesh;
 let handAim=new Map(), activeHandRay=null, visionStream=null, handLandmarker=null, visionHands=[], pinchState=new Map(), lastVisionFrame=0, visionBusy=false;
+let xrBaseSpace=null,xrMove=new THREE.Vector3(),xrTriggerDown=false,xrHeldByController=false;
 let targets=[],paint=[],lastTrigger=false,lastShot=0,moveTouch={x:0,y:0},yaw=0,pitch=0,deviceQ=new THREE.Quaternion(),screenQ=new THREE.Quaternion();
 const ray=new THREE.Raycaster(), v=new THREE.Vector3();
 
@@ -50,7 +51,7 @@ function createVisionHands(){
  for(let h=0;h<2;h++){
   const joints=[];
   for(let i=0;i<21;i++){
-   const dot=new THREE.Mesh(new THREE.SphereGeometry(.018,8,6),new THREE.MeshBasicMaterial({color:h===0?0x36e6ff:0xffcf45}));
+   const dot=new THREE.Mesh(new THREE.SphereGeometry(.023,10,8),new THREE.MeshStandardMaterial({color:h===0?0x36e6ff:0xffcf45,emissive:h===0?0x063b48:0x493300,roughness:.28,metalness:.18}));
    scene.add(dot);joints.push(dot);
   }
   const lines=HAND_BONES.map(()=>{const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));const line=new THREE.Line(geo,new THREE.LineBasicMaterial({color:h===0?0x36e6ff:0xffcf45}));scene.add(line);return line});
@@ -67,7 +68,7 @@ async function startVisionHands(){
   const options={baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'},runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.55,minHandPresenceConfidence:.5,minTrackingConfidence:.5};
   try{handLandmarker=await HandLandmarker.createFromOptions(files,{...options,baseOptions:{...options.baseOptions,delegate:'GPU'}})}catch(gpuError){handLandmarker=await HandLandmarker.createFromOptions(files,{...options,baseOptions:{...options.baseOptions,delegate:'CPU'}})}
   createVisionHands();msg.textContent='';state.textContent='WEBXR ACTIVE • CAMERA HAND TRACKING';
-  tip.textContent='Show your hands in the rear camera view • pinch thumb and index finger';
+  tip.textContent='LEFT STICK: MOVE • RIGHT TRIGGER: GRAB NEARBY OBJECT / PRESS BUTTON';
  }catch(e){
   msg.textContent='Hand tracking camera setup failed: '+(e?.message||e);
   state.textContent='WEBXR ACTIVE • HAND CAMERA UNAVAILABLE';
@@ -125,10 +126,12 @@ function init(){
  scene=new THREE.Scene();scene.background=new THREE.Color(0x9ba8a9);scene.fog=new THREE.Fog(0x9ba8a9,45,180);
  centerCam=new THREE.PerspectiveCamera(76,innerWidth/innerHeight,.05,300);centerCam.position.set(0,1.68,5);
  leftCam=new THREE.PerspectiveCamera(76,innerWidth/innerHeight,.05,300);rightCam=leftCam.clone();
- renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});renderer.setPixelRatio(Math.min(devicePixelRatio,1.7));renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.xr.enabled=true;document.body.appendChild(renderer.domElement);
- clock=new THREE.Clock();scene.add(new THREE.HemisphereLight(0xeaf4ff,0x5b554d,2));
- const sun=new THREE.DirectionalLight(0xfff0dc,2.5);sun.position.set(-12,24,10);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);scene.add(sun);
- const floor=new THREE.Mesh(new THREE.PlaneGeometry(500,500),mat(0x777b78,1));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+ renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;renderer.xr.enabled=true;document.body.appendChild(renderer.domElement);
+ clock=new THREE.Clock();scene.add(new THREE.HemisphereLight(0xeaf4ff,0x555b63,2.1));
+  const fill=new THREE.DirectionalLight(0x9dc8ff,1.15);fill.position.set(12,8,-14);scene.add(fill);
+ const sun=new THREE.DirectionalLight(0xfff0dc,2.5);sun.position.set(-12,24,10);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);sun.shadow.camera.left=-28;sun.shadow.camera.right=28;sun.shadow.camera.top=28;sun.shadow.camera.bottom=-28;sun.shadow.bias=-.00025;scene.add(sun);
+ const floor=new THREE.Mesh(new THREE.PlaneGeometry(500,500),new THREE.MeshStandardMaterial({color:0x626b70,roughness:.92,metalness:.08}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
+  const grid=new THREE.GridHelper(500,100,0x84939a,0x77838a);grid.position.y=.012;grid.material.transparent=true;grid.material.opacity=.18;scene.add(grid);
  for(let i=0;i<5;i++)mannequin((i-2)*1.65,-9,i);
  const metal=mat(0x343b42,.4,.7),wood=mat(0x594738);
  meshBox(1.9,.14,1.05,wood,2.35,1.02,0);
@@ -158,6 +161,39 @@ function interact(handRay=null){
  if(held)shoot();else tip.textContent='Point your index finger and pinch to interact.';
  activeHandRay=null;
 }
+function xrUseRightHand(point){
+ const wp=weapon.getWorldPosition(new THREE.Vector3()),bp=buttonMesh.getWorldPosition(new THREE.Vector3());
+ if(point.distanceTo(wp)<.72){
+  if(!held){held=true;xrHeldByController=true;tip.textContent='WEAPON PICKED UP • RIGHT TRIGGER TO FIRE'}
+  else shoot();
+ }else if(point.distanceTo(bp)<.52){
+  buttonMesh.material.color.set(0x38d66b);tip.textContent='TABLE BUTTON ACTIVATED';setTimeout(()=>buttonMesh.material.color.set(0xd51e2b),850);
+ }else if(held)shoot();else tip.textContent='Move your right hand closer to the weapon or button.';
+}
+function updateXRControls(dt){
+ if(!renderer.xr.isPresenting)return;
+ const session=renderer.xr.getSession();if(!session)return;
+ let left=null,right=null;
+ for(const source of session.inputSources){if(source.handedness==='left'&&source.gamepad)left=source;if(source.handedness==='right'&&source.gamepad)right=source}
+ if(left){
+  const axes=left.gamepad.axes||[];const x=axes.length>=4?(axes[2]||0):(axes[0]||0),y=axes.length>=4?(axes[3]||0):(axes[1]||0);
+  if(Math.abs(x)>.12||Math.abs(y)>.12){
+   const cam=renderer.xr.getCamera(centerCam),q=new THREE.Quaternion().setFromRotationMatrix(cam.matrixWorld);
+   const f=new THREE.Vector3(0,0,-1).applyQuaternion(q);f.y=0;f.normalize();
+   const side=new THREE.Vector3(1,0,0).applyQuaternion(q);side.y=0;side.normalize();
+   xrMove.addScaledVector(f,-y*2.8*dt);xrMove.addScaledVector(side,x*2.8*dt);
+   const base=xrBaseSpace||renderer.xr.getReferenceSpace();
+   if(base&&typeof XRRigidTransform!=='undefined')renderer.xr.setReferenceSpace(base.getOffsetReferenceSpace(new XRRigidTransform({x:-xrMove.x,y:-xrMove.y,z:-xrMove.z})));
+  }
+ }
+ if(right){
+  const controller=renderer.xr.getController(1);controller.updateMatrixWorld(true);
+  const point=controller.getWorldPosition(new THREE.Vector3()),pressed=!!right.gamepad.buttons?.[0]?.pressed;
+  if(pressed&&!xrTriggerDown)xrUseRightHand(point);
+  xrTriggerDown=pressed;
+  if(held&&xrHeldByController){weapon.position.lerp(point,.38);weapon.quaternion.slerp(new THREE.Quaternion().setFromRotationMatrix(controller.matrixWorld),.35)}
+ }else xrTriggerDown=false;
+}
 function burst(p){for(let i=0;i<24;i++){const m=new THREE.Mesh(new THREE.SphereGeometry(.035,6,5),mat(i%2?0xc51c2b:0xff5960));m.position.copy(p);scene.add(m);paint.push({m,v:new THREE.Vector3((Math.random()-.5)*4,Math.random()*3,(Math.random()-.5)*4),life:1})}}
 function shoot(){
  if(!held)return;const now=performance.now();if(now-lastShot<280)return;lastShot=now;
@@ -182,7 +218,7 @@ function updatePhysics(dt){
 }
 function render(time, xrFrame){
  const dt=Math.min(clock.getDelta(),.04);
- if(renderer.xr.isPresenting && xrFrame){updateVisionHands(performance.now())}
+ if(renderer.xr.isPresenting && xrFrame){updateVisionHands(performance.now());updateXRControls(dt)}
  if(!renderer.xr.isPresenting){
   updateInput(dt);orientCamera();
   if(held){const pos=new THREE.Vector3(.32,-.25,-.65).applyQuaternion(centerCam.quaternion).add(centerCam.position);weapon.position.lerp(pos,.35);weapon.quaternion.slerp(centerCam.quaternion,.35)}
@@ -212,9 +248,11 @@ async function enableGyro(){
  }catch(e){msg.textContent='Gyroscope permission failed: '+e.message}
 }
 function installXRHands(session){
+ xrBaseSpace=renderer.xr.getReferenceSpace();xrMove.set(0,0,0);xrTriggerDown=false;xrHeldByController=false;
+ const leftController=renderer.xr.getController(0),rightController=renderer.xr.getController(1);scene.add(leftController,rightController);
  state.textContent='WEBXR ACTIVE • STARTING CAMERA HAND TRACKING';
  session.addEventListener('end',()=>{
-  handAim.clear();activeHandRay=null;pinchState.clear();
+  handAim.clear();activeHandRay=null;pinchState.clear();xrBaseSpace=null;xrMove.set(0,0,0);xrTriggerDown=false;xrHeldByController=false;
   if(visionStream){visionStream.getTracks().forEach(t=>t.stop());visionStream=null}
   if(handLandmarker){handLandmarker.close();handLandmarker=null}
   visionHands.forEach(hand=>{hand.joints.forEach(o=>scene.remove(o));hand.lines.forEach(o=>scene.remove(o))});visionHands=[];
