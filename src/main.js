@@ -1,7 +1,7 @@
 import './style.css';
 const $=s=>document.querySelector(s);let firstLink='',activeLink='',bg='space',audioOn=false,volume=.2,audio=null,hand=null;
 function say(t){const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>e.classList.remove('show'),2200)}
-function valid(v){v=v.trim();if(!v)return '';if(!/^https?:\\/\\//i.test(v))v='https://'+v;try{return new URL(v).href}catch{return ''}}
+function valid(v){v=v.trim();if(!v)return '';if(!v.startsWith('http://')&&!v.startsWith('https://'))v='https://'+v;try{return new URL(v).href}catch{return ''}}
 function openPage(raw){const u=valid(raw);if(!u)return say('Digite um endereço válido.');activeLink=u;$('#url').value=u;let target=u;const p=new URL(u);if(p.hostname.includes('youtube.com')&&p.pathname==='/watch'&&p.searchParams.get('v'))target='https://www.youtube-nocookie.com/embed/'+encodeURIComponent(p.searchParams.get('v'))+'?autoplay=1';else if(p.hostname==='youtu.be')target='https://www.youtube-nocookie.com/embed/'+encodeURIComponent(p.pathname.slice(1))+'?autoplay=1';$('#frame').src=target;$('#frame').style.display='block';$('#placeholder').style.display='none';$('#page-title').textContent=p.hostname;say('Abrindo página…')}
 function browser(link=''){ $('#side').classList.add('hidden');$('#browser').classList.remove('hidden');if(link)openPage(link)}
 function closePanels(){$('#browser').classList.add('hidden');$('#side').classList.add('hidden')}
