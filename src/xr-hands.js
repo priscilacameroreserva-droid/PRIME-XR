@@ -83,7 +83,7 @@ function makeLabel(text) {
   return texture;
 }
 
-function addDock(scene, camera) {
+function addDock(scene) {
   const dock = new THREE.Group();
   const panel = new THREE.Mesh(
     new THREE.BoxGeometry(0.92, 0.34, 0.035),
@@ -123,13 +123,6 @@ function addDock(scene, camera) {
     hitTargets.push(button);
   });
 
-  const direction = new THREE.Vector3();
-  const position = new THREE.Vector3();
-  camera.getWorldDirection(direction);
-  camera.getWorldPosition(position);
-  dock.position.copy(position).add(direction.multiplyScalar(1.35));
-  dock.position.y -= 0.18;
-  dock.lookAt(position);
   scene.add(dock);
   return { dock, hitTargets };
 }
@@ -139,12 +132,9 @@ export async function startQuestXR(onStatus = () => {}) {
     onStatus('WebXR não está disponível neste navegador. Abra o PRIME-XR no navegador do Meta Quest.');
     return false;
   }
-  const supported = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
-  if (!supported) {
-    onStatus('Este navegador não oferece uma sessão VR imersiva.');
-    return false;
-  }
   try {
+    // Request the session immediately from the user's button press so the
+    // browser's transient user activation is still valid.
     activeSession = await navigator.xr.requestSession('immersive-vr', {
       optionalFeatures: ['hand-tracking', 'local-floor']
     });
@@ -171,7 +161,8 @@ export async function startQuestXR(onStatus = () => {}) {
     const models = [makeController(true), makeController(false)];
     hands.forEach((hand, i) => { scene.add(hand); scene.add(models[i]); });
 
-    const { hitTargets } = addDock(scene, camera);
+    const { dock, hitTargets } = addDock(scene);
+    let dockPlaced = false;
     const raycaster = new THREE.Raycaster();
     const previousPinch = [false, false];
     const tempMatrix = new THREE.Matrix4();
@@ -233,6 +224,16 @@ export async function startQuestXR(onStatus = () => {}) {
     await renderer.xr.setSession(activeSession);
     onStatus('VR iniciado. Mostre as duas mãos e faça pinça para clicar.');
     renderer.setAnimationLoop(() => {
+      if (!dockPlaced) {
+        const direction = new THREE.Vector3();
+        const position = new THREE.Vector3();
+        camera.getWorldDirection(direction);
+        camera.getWorldPosition(position);
+        dock.position.copy(position).add(direction.multiplyScalar(1.35));
+        dock.position.y -= 0.18;
+        dock.lookAt(position);
+        dockPlaced = true;
+      }
       updateController(0);
       updateController(1);
       renderer.render(scene, camera);
